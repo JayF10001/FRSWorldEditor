@@ -561,6 +561,18 @@ bool World::IsLibrary(const LoadedSection& section) const {
            (section.info->position.x == 0.0f && section.info->position.y == 0.0f);
 }
 
+// A new model is built by rebuilding one of the section's own objects around
+// the new mesh (SelectionImport's BuildAddedModel): a section without one -- the
+// sky's, or one that only holds collision or placements -- cannot take it.
+static bool HasModelToBuildFrom(const LoadedSection& section) {
+    for (const SolidList& list : section.solidLists)
+        for (const SolidObject& model : list.objects)
+            if (model.vertexStride && !model.vertices.empty() &&
+                model.name.find("SKY") == std::string::npos && model.name.find("PAN_") == std::string::npos)
+                return true;
+    return false;
+}
+
 size_t World::SectionForPlacement(const Vec3& point) const {
     size_t best = SIZE_MAX, nearest = SIZE_MAX;
     float bestDistance = 1e30f, nearestDistance = 1e30f;
@@ -568,6 +580,7 @@ size_t World::SectionForPlacement(const Vec3& point) const {
     for (size_t i = 0; i < loaded_.size(); ++i) {
         const LoadedSection& candidate = *loaded_[i];
         if (!candidate.info || IsLibrary(candidate) || IsUnusedAlternate(*candidate.info)) continue;
+        if (!HasModelToBuildFrom(candidate)) continue;
         if (std::find(candidate.sceneryNumbers.begin(), candidate.sceneryNumbers.end(),
                       candidate.info->number) == candidate.sceneryNumbers.end())
             continue;
@@ -599,6 +612,7 @@ size_t World::SectionForPlacementAlong(const std::vector<Vec3>& points) const {
     for (size_t i : SectionsLoadedThroughout(points)) {
         const LoadedSection& candidate = *loaded_[i];
         if (!candidate.info || IsLibrary(candidate) || IsUnusedAlternate(*candidate.info)) continue;
+        if (!HasModelToBuildFrom(candidate)) continue;
         if (std::find(candidate.sceneryNumbers.begin(), candidate.sceneryNumbers.end(), candidate.info->number) ==
             candidate.sceneryNumbers.end())
             continue;

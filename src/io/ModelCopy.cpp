@@ -72,8 +72,16 @@ bool AppendSolidObject(ByteSpan pack, u64 packOffset, ByteSpan object, u64 objec
                     Put32(bytes, 8 + kInfoObjectCount, Read32(bytes.data() + 8 + kInfoObjectCount) + 1);
                 } else if (part.id == kListHashes) {
                     // Pairs of (hash, 0), sorted, possibly after 0x11 filler.
+                    // A hash may itself start with the byte 0x11 (0x1E88A511),
+                    // so the filler is the longest run of it that still leaves
+                    // whole pairs -- never the first byte of a hash.
+                    size_t run = 8;
+                    while (run < bytes.size() && bytes[run] == 0x11) ++run;
                     size_t first = 8;
-                    while (first < bytes.size() && bytes[first] == 0x11) ++first;
+                    for (size_t filler = run - 8; ; --filler) {
+                        if ((bytes.size() - 8 - filler) % 8 == 0) { first = 8 + filler; break; }
+                        if (filler == 0) break;
+                    }
                     std::vector<std::pair<u32, u32>> pairs;
                     for (size_t at = first; at + 8 <= bytes.size(); at += 8)
                         pairs.push_back({ Read32(bytes.data() + at), Read32(bytes.data() + at + 4) });
