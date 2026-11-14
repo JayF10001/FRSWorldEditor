@@ -8048,7 +8048,10 @@ bool RoadsExtension::BakeGroundCollision(size_t& moved) {
     if (!world || !tools) return false;
     cutsCache_ = network_.Cuts();
     const auto& cuts = cutsCache_;
-    if (ground_.Empty() && !(fitGround_ && !groundField_.Empty()) && cuts.empty()) return true;
+    // Bridges of ours may stand over the game's barriers (see below), so they count too.
+    const bool bridges = std::any_of(network_.Segments().begin(), network_.Segments().end(),
+                                     [](const roads::Segment& seg) { return seg.profile.bridge; });
+    if (ground_.Empty() && !(fitGround_ && !groundField_.Empty()) && cuts.empty() && !bridges) return true;
     collision::Editor& editor = tools->Editor();
     if (editor.World() != world) editor.SetWorld(world);
     // The bake's polygons are the roads' own edit (the "Roads baked" row),
@@ -8105,6 +8108,67 @@ bool RoadsExtension::BakeGroundCollision(size_t& moved) {
         m.wall[1] = p.Wall(1) && p.wallHeight >= 0.05f;
         mouths.push_back(m);
     }
+    // Where a bridge of ours passes over one of the game's barriers: those
+    // are walls of unbounded height, so a car on the deck would hit one in
+    // mid air. Under the deck the barrier becomes a wall of real height, up
+    // to just below the deck -- it still stops a car on the road beneath --
+    // and either side of the deck it stays a barrier.
+    struct DeckPiece {
+        Vec3 corner[4];          // in plan, anticlockwise
+        float top = 0.0f;        // the deck's surface there
+        float bottom = 0.0f;     // its underside
+    };
+    std::vector<DeckPiece> decks;
+    for (const roads::Segment& seg : network_.Segments()) {
+        if (!seg.profile.bridge) continue;
+        const roads::Curve curve = network_.CurveOf(seg);
+        const float half = std::max(seg.profile.Edge(-1), seg.profile.Edge(1)) + 0.5f;
+        const float length = Length(curve.p1 - curve.p0) + Length(curve.p2 - curve.p1) + Length(curve.p3 - curve.p2);
+        const int steps = std::clamp((int)(length / 2.0f), 2, 400);
+        Vec3 prevL{}, prevR{};
+        float prevZ = 0.0f;
+        for (int k = 0; k <= steps; ++k) {
+            const float t = (float)k / steps;
+            const Vec3 d = HorizontalDirection(curve.Tangent(t));
+            const Vec3 right{ d.y, -d.x, 0.0f };
+            const Vec3 c = curve.At(t) + right * seg.Offset();
+            const Vec3 l = c - right * half, r = c + right * half;
+            if (k > 0) {
+                DeckPiece piece;
+                piece.corner[0] = prevL; piece.corner[1] = prevR; piece.corner[2] = r; piece.corner[3] = l;
+                if (Cross(piece.corner[1] - piece.corner[0], piece.corner[2] - piece.corner[0]).z < 0.0f) {
+                    std::swap(piece.corner[1], piece.corner[3]);
+                }
+                piece.top = std::min(prevZ, c.z);
+                piece.bottom = piece.top - std::max(0.2f, seg.profile.deckThickness);
+                decks.push_back(piece);
+            }
+            prevL = l; prevR = r; prevZ = c.z;
+        }
+    }
+    // The part of a line a->b inside a deck piece (convex): t0..t1, or false.
+    const auto underDeck = [](const DeckPiece& piece, const Vec3& a, const Vec3& b, float& t0, float& t1) {
+        t0 = 0.0f;
+        t1 = 1.0f;
+        const Vec3 d{ b.x - a.x, b.y - a.y, 0.0f };
+        for (int e = 0; e < 4; ++e) {
+            const Vec3& p0 = piece.corner[e];
+            const Vec3& p1 = piece.corner[(e + 1) % 4];
+            const Vec3 inward{ -(p1.y - p0.y), p1.x - p0.x, 0.0f };     // left of an anticlockwise edge
+            const float start = Dot(Vec3{ a.x - p0.x, a.y - p0.y, 0.0f }, inward), step = Dot(d, inward);
+            if (std::fabs(step) < 1e-7f) {
+                if (start < 0.0f) return false;
+                continue;
+            }
+            const float t = -start / step;
+            if (step > 0.0f) t0 = std::max(t0, t);
+            else t1 = std::min(t1, t);
+            if (t0 >= t1) return false;
+        }
+        return t1 - t0 > 1e-4f;
+    };
+    size_t barriersUnderBridges = 0;
+
     std::vector<nfs::CollisionPolygon> connectors;
     size_t barriersOpened = 0;
     // The part of a barrier's line inside a mouth: t0..t1 of a->b, or false.
@@ -8179,6 +8243,54 @@ bool RoadsExtension::BakeGroundCollision(size_t& moved) {
                     }
                     if (opened) continue;
                 }
+                if (p.barrier && !decks.empty()) {
+                    // Under our bridges: the stretches beneath a deck, high enough over the ground.
+                    const Vec3 a = p.corners[0], b = p.corners[2];
+                    struct Span { float t0, t1, base, height; };
+                    std::vector<Span> spans;
+                    for (const DeckPiece& piece : decks) {
+                        float t0 = 0.0f, t1 = 0.0f;
+                        if (!underDeck(piece, a, b, t0, t1)) continue;
+                        // A piece left by an earlier bake ends on the deck's edge: nothing under it.
+                        if ((t1 - t0) * Length(Vec3{ b.x - a.x, b.y - a.y, 0.0f }) < 0.1f) continue;
+                        const Vec3 mid = a + (b - a) * ((t0 + t1) * 0.5f);
+                        float base = 0.0f;
+                        if (!GroundBelow(mid.x, mid.y, piece.bottom - 0.5f, base)) continue;
+                        const float height = piece.bottom - 0.3f - base;
+                        if (height < 2.0f) continue;      // the deck is down on the ground: a barrier there is meant
+                        spans.push_back({ t0, t1, base, height });
+                    }
+                    if (!spans.empty()) {
+                        refs.push_back({ (u32)s, (u32)k, (u32)i });
+                        if (seen.insert(key).second) {
+                            ++barriersUnderBridges;
+                            std::sort(spans.begin(), spans.end(), [](const Span& x, const Span& y) { return x.t0 < y.t0; });
+                            const auto barrier = [&](float from, float to) {
+                                if ((to - from) * Length(Vec3{ b.x - a.x, b.y - a.y, 0.0f }) < 0.05f) return;
+                                nfs::CollisionPolygon q = p;
+                                const nfs::CollisionPolygon shape =
+                                    collision::MakeBarrier(a + (b - a) * from, a + (b - a) * to, p.surface);
+                                for (int c = 0; c < 4; ++c) q.corners[c] = shape.corners[c];
+                                replacements.push_back(q);
+                            };
+                            float at = 0.0f;
+                            for (const Span& span : spans) {
+                                const float from = std::max(at, span.t0);
+                                if (span.t1 <= from) continue;
+                                barrier(at, from);
+                                Vec3 w0 = a + (b - a) * from, w1 = a + (b - a) * span.t1;
+                                w0.z = w1.z = span.base - 0.2f;
+                                nfs::CollisionPolygon wall = collision::MakeVerticalWall(w0, w1, span.height + 0.2f, p.surface);
+                                wall.raceGroup = p.raceGroup;
+                                wall.attributes[0] = p.attributes[0];
+                                replacements.push_back(wall);
+                                at = span.t1;
+                            }
+                            barrier(at, 1.0f);
+                        }
+                        continue;
+                    }
+                }
                 if (p.barrier || p.Vertical()) {
                     // A wall goes when its middle stands inside a cut.
                     const Vec3 middle = (p.corners[0] + p.corners[2]) * 0.5f;
@@ -8240,6 +8352,8 @@ bool RoadsExtension::BakeGroundCollision(size_t& moved) {
     if (barriersOpened)
         LOG_INFO("ground: %zu game barriers opened at junction mouths, %zu links to the roads' own", barriersOpened,
                  connectors.size() / 2);
+    if (barriersUnderBridges)
+        LOG_INFO("ground: %zu game barriers under our bridges made walls up to the deck", barriersUnderBridges);
     if (!replacements.empty()) editor.Add(replacements, L"Sculpt the ground");
     tools->RefreshAfterEdit();
     moved = replacements.size() + removedInCuts;

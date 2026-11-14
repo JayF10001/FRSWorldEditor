@@ -22,6 +22,10 @@ constexpr size_t kInfoSize        = 68;
 constexpr size_t kInfoName        = 0x00;
 constexpr size_t kInfoHash        = 0x20;
 constexpr size_t kInfoHashAgain   = 0x24;
+// The far (and reflected) model: XO_CATSEYEORANGE_1Z_00 for ..._1A_00. A copy
+// of another section's record names a model this section may not have, and
+// the game crashes resolving it (SPEED2 0x493832), so it is the placed model too.
+constexpr size_t kInfoFarHash     = 0x28;
 constexpr size_t kInfoTriangles   = 0x2C;   // u16, and again at 0x2E
 constexpr size_t kInfoRadius      = 0x3C;
 
@@ -288,6 +292,9 @@ bool AppendScenery(ByteSpan shipped, u64 fileOffset, const std::vector<PlacedIns
             }
             Put32(entry, kInfoHash, placed.modelHash);
             Put32(entry, kInfoHashAgain, placed.modelHash);
+            u32 farModel = 0;
+            std::memcpy(&farModel, entry.data() + kInfoFarHash, 4);
+            if (farModel != 0) Put32(entry, kInfoFarHash, placed.modelHash);
             infos.insert(infos.end(), entry.begin(), entry.end());
         }
         infoFor[k] = (u16)found;
