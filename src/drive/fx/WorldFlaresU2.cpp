@@ -185,6 +185,13 @@ size_t WorldFlaresU2::Load(const nfs::World& world) {
     return flareCount_;
 }
 
+std::vector<LightFlareU2>& WorldFlaresU2::ExtraFlares() {
+    static std::vector<LightFlareU2> extra;
+    return extra;
+}
+
+void WorldFlaresU2::SetExtraFlares(std::vector<LightFlareU2> flares) { ExtraFlares() = std::move(flares); }
+
 bool WorldFlaresU2::BoxVisible(const FlareViewU2& v, const float* mn, const float* mx) {
     for (int i = 0; i < 6; ++i) {
         const float* q = v.Planes + 4 * i;
@@ -216,6 +223,13 @@ void WorldFlaresU2::Build(const FlareViewU2& view, const std::vector<u32>* visib
             const int n = CarLightFlaresU2::Render(view, f, identity, 1.0f, 0, table_, polys, 2);
             for (int k = 0; k < n && k < 2; ++k) out.push_back({ polys[k], false });
         }
+    }
+    // The editor's own street lights, not in any pack yet: as pack flares.
+    for (const LightFlareU2& f : ExtraFlares()) {
+        const float mn[3] = { f.X - 1.0f, f.Y - 1.0f, f.Z - 1.0f }, mx[3] = { f.X + 1.0f, f.Y + 1.0f, f.Z + 1.0f };
+        if (!BoxVisible(view, mn, mx)) continue;
+        const int n = CarLightFlaresU2::Render(view, f, identity, 1.0f, 0, table_, polys, 2);
+        for (int k = 0; k < n && k < 2; ++k) out.push_back({ polys[k], false });
     }
     // B: the pools, filled in section order by the scenery pass, drawn by sub_494270: list 0 then list 1.
     int used[2] = { 0, 0 };

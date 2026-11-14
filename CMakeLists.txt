@@ -33,6 +33,7 @@ add_executable(FRSWorldEditor WIN32
     src/io/WorldPublish.cpp
     src/io/MarkerWrite.cpp
     src/io/MarkerEffects.cpp
+    src/io/LightFlares.cpp
     src/nfs/Markers.cpp
     src/ui/MarkersExtension.cpp
     src/io/SelectionExport.cpp
@@ -86,6 +87,7 @@ add_executable(FRSWorldEditor WIN32
     src/ui/RoadsExtension.cpp
     src/roads/RoadNetwork.cpp
     src/roads/CityZones.cpp
+    src/roads/Water.cpp
     src/roads/Prefabs.cpp
     src/roads/RoadBake.cpp
     src/roads/RoadRoutes.cpp

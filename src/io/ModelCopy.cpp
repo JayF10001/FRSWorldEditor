@@ -185,6 +185,27 @@ const nfs::Texture* FindGameTextureByFile(const nfs::World& world, const std::st
 }
 
 bool CopyGameTexture(const nfs::Texture& source, NewTexture& copy) {
+    if (source.format == nfs::TextureFormat::Palettised8) {
+        // The street surfaces (lanes, shoulders, pavements) are palettised,
+        // and a pack of ours only holds DXT: the top level is expanded
+        // through its palette -- D3DCOLOR entries, so B, G, R straight
+        // across; the fourth byte is the wet-road gloss, not opacity -- and
+        // compressed with fresh mips. Without this the copy was refused and
+        // the model named a texture its section never had: drawn as nothing.
+        const u32 w = source.width, h = source.height;
+        if (!w || !h || (w % 4) || (h % 4) || source.palette.size < 256 * 4 ||
+            source.pixels.size < (size_t)w * h)
+            return false;
+        std::vector<u32> bgra((size_t)w * h);
+        for (size_t i = 0; i < bgra.size(); ++i) {
+            const u8* entry = source.palette.data + (size_t)source.pixels.data[i] * 4;
+            bgra[i] = (u32)entry[0] | ((u32)entry[1] << 8) | ((u32)entry[2] << 16) | 0xFF000000u;
+        }
+        TextureFromPixels(source.name, bgra, w, h, copy);
+        copy.name = source.name;
+        copy.hash = source.hash;
+        return !copy.pixels.empty();
+    }
     copy.name   = source.name;
     copy.hash   = source.hash;
     copy.width  = source.width;

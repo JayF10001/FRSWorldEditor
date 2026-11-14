@@ -160,7 +160,7 @@ int ClassifyBuilding(const std::string& name, const Vec3& min, const Vec3& max) 
 void Network::PlaceBuildings(std::vector<Pole>& poles, std::vector<MeshPiece>& pieces) const {
     bool any = false;
     for (const Segment& s : segments_)
-        if (!s.profile.bridge && (s.profile.zoneLeft || s.profile.zoneRight)) any = true;
+        if (!s.profile.OffGround() && (s.profile.zoneLeft || s.profile.zoneRight)) any = true;
     if (!any || buildings_.empty()) return;
 
     // The models of each kind; a kind the region has none of takes any.
@@ -245,7 +245,7 @@ void Network::PlaceBuildings(std::vector<Pole>& poles, std::vector<MeshPiece>& p
     size_t placed = 0;
     for (const Segment& s : segments_) {
         const RoadProfile& p = s.profile;
-        if (p.bridge || (!p.zoneLeft && !p.zoneRight)) continue;
+        if (p.OffGround() || (!p.zoneLeft && !p.zoneRight)) continue;
         const Curve curve = CurveOf(s);
         // Length along the road's middle, for walking it.
         const int n = 200;

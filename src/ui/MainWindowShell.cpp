@@ -82,6 +82,7 @@ const char* ToolbarIcon(const std::wstring& text) {
         { L"Grid", ICON_PH_GRID_FOUR },             { L"Lights", ICON_PH_LIGHTBULB },
         { L"Terrain", ICON_PH_MOUNTAINS },
         { L"Trees", ICON_PH_TREE },                 { L"Props", ICON_PH_TRAFFIC_CONE },
+        { L"Water", ICON_PH_DROP },
         { L"Fast test", ICON_PH_PLAY },
     };
     for (const Pair& pair : kIcons)
@@ -158,7 +159,7 @@ void MainWindow::DrawShellBars() {
         const auto groupOf = [](const std::wstring& text) {
             for (const wchar_t* game : { L"Launch game", L"Show map", L"Show game", L"Fast test" })
                 if (text == game) return 0;
-            for (const wchar_t* tool : { L"Move", L"Rotate", L"Scale", L"Roads", L"Grid", L"Trees", L"Terrain" })
+            for (const wchar_t* tool : { L"Move", L"Rotate", L"Scale", L"Roads", L"Grid", L"Trees", L"Terrain", L"Water" })
                 if (text == tool) return 1;
             return 2;
         };

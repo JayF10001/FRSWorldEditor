@@ -111,6 +111,61 @@ std::vector<u8> WrapChunk(u32 id, const std::vector<u8>& payload, u64 fileOffset
     return out;
 }
 
+// A light flare pack as an edit: its header's and its flares' payloads, the
+// fillers left out (they depend on where the pack lands).
+SectionEdit FlaresEdit(const TopChunk& top) {
+    SectionEdit edit;
+    edit.kind = SectionEdit::Kind::Flares;
+    edit.label = "light flares";
+    edit.order = top.order;
+    const ByteSpan data = top.chunk.data;
+    std::vector<u8> header, flares;
+    size_t at = 0;
+    while (at + 8 <= data.size) {
+        const u32 id = data.read<u32>(at), size = data.read<u32>(at + 4);
+        if (at + 8 + size > data.size) break;
+        size_t from = at + 8;
+        const size_t end = at + 8 + size;
+        while (from < end && data.data[from] == 0x11) ++from;
+        if (id == nfs::kChunkFlareHeader) header.assign(data.data + from, data.data + end);
+        else if (id == nfs::kChunkFlares) flares.assign(data.data + from, data.data + end);
+        at = end;
+    }
+    header.resize(0x60, 0);
+    edit.record = header;
+    edit.record.insert(edit.record.end(), flares.begin(), flares.end());
+    wchar_t text[64];
+    ::swprintf_s(text, L"%zu flares", flares.size() / 0x30);
+    edit.detail = text;
+    return edit;
+}
+
+// The pack an edit holds, laid out to start at `fileOffset`: the container,
+// then its header and flares, each with the 0x11 filler that puts its payload
+// on a 16-byte boundary.
+std::vector<u8> MakeFlarePack(const std::vector<u8>& record, u64 fileOffset) {
+    const auto child = [](u32 id, const u8* data, size_t size, u64 at) {
+        const size_t filler = (size_t)((16 - (at + 8) % 16) % 16);
+        std::vector<u8> out(8 + filler, 0x11);
+        const u32 total = (u32)(filler + size);
+        std::memcpy(out.data(), &id, 4);
+        std::memcpy(out.data() + 4, &total, 4);
+        out.insert(out.end(), data, data + size);
+        return out;
+    };
+    const size_t headerSize = std::min<size_t>(0x60, record.size());
+    std::vector<u8> body = child(nfs::kChunkFlareHeader, record.data(), headerSize, fileOffset + 8);
+    const std::vector<u8> flares = child(nfs::kChunkFlares, record.data() + headerSize, record.size() - headerSize,
+                                         fileOffset + 8 + body.size());
+    body.insert(body.end(), flares.begin(), flares.end());
+    std::vector<u8> out(8);
+    const u32 id = nfs::kChunkFlarePack, size = (u32)body.size();
+    std::memcpy(out.data(), &id, 4);
+    std::memcpy(out.data() + 4, &size, 4);
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
+}
+
 SectionEdit EmittersEdit(const TopChunk& top) {
     SectionEdit edit;
     edit.kind = SectionEdit::Kind::Emitters;
@@ -215,6 +270,7 @@ const wchar_t* EditKindName(SectionEdit::Kind kind) {
         case SectionEdit::Kind::NativeDeleted:  return L"Object deleted";
         case SectionEdit::Kind::NativeChanged:  return L"Object changed";
         case SectionEdit::Kind::Emitters:       return L"Effects";
+        case SectionEdit::Kind::Flares:         return L"Light flares";
         default:                                return L"Other change";
     }
 }
@@ -248,6 +304,10 @@ bool DiffSectionBytes(const nfs::World& world, const nfs::Section& section, Byte
         const TopChunk* a = find(shipped, b.id, b.order);
         if (!a && b.id == nfs::kChunkEmitters) {
             out.push_back(EmittersEdit(b));
+            continue;
+        }
+        if (!a && b.id == nfs::kChunkFlarePack) {
+            out.push_back(FlaresEdit(b));
             continue;
         }
         if (!a) {
@@ -370,6 +430,9 @@ bool DiffSectionBytes(const nfs::World& world, const nfs::Section& section, Byte
             case nfs::kChunkEmitters:
                 out.push_back(EmittersEdit(b));
                 break;
+            case nfs::kChunkFlarePack:
+                out.push_back(FlaresEdit(b));
+                break;
             default: {
                 SectionEdit other;
                 wchar_t text[64];
@@ -478,6 +541,12 @@ bool BuildSection(const nfs::World& world, const nfs::Section& section,
                 error = L"The rebuilt scenery would not be valid: " + Widen(why);
                 return false;
             }
+        } else if (top.id == nfs::kChunkFlarePack) {
+            const SectionEdit* flares = nullptr;
+            for (const SectionEdit& edit : edits)
+                if (edit.kind == SectionEdit::Kind::Flares && edit.order == top.order) flares = &edit;
+            if (!flares) continue;
+            splice.bytes = MakeFlarePack(flares->record, top.fileOffset);
         } else if (top.id == nfs::kChunkEmitters) {
             const SectionEdit* effects = nullptr;
             for (const SectionEdit& edit : edits)
@@ -488,6 +557,25 @@ bool BuildSection(const nfs::World& world, const nfs::Section& section,
             continue;
         }
         splices.push_back(std::move(splice));
+    }
+
+    // Light flares for a section that shipped with none: a pack of their own,
+    // where the game's packs stand -- before the effects, or before
+    // 0x80036000, or last.
+    const bool shippedFlares = std::any_of(shipped.begin(), shipped.end(),
+                                           [](const TopChunk& t) { return t.id == nfs::kChunkFlarePack; });
+    if (!shippedFlares) {
+        for (const SectionEdit& edit : edits) {
+            if (edit.kind != SectionEdit::Kind::Flares) continue;
+            size_t at = shipped.empty() ? 0 : shipped.back().end;
+            for (const TopChunk& top : shipped)
+                if (top.id == nfs::kChunkEmitters || top.id == nfs::kChunkAfterEmitters) { at = top.start; break; }
+            ChunkEdit insert;
+            insert.start = insert.end = at;
+            insert.bytes = MakeFlarePack(edit.record, section.originalStreamOffset + at);
+            splices.push_back(std::move(insert));
+            break;
+        }
     }
 
     // Effects for a section that shipped with none: a chunk of their own, where
