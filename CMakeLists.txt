@@ -82,6 +82,7 @@ add_executable(FRSWorldEditor WIN32
     src/ui/OverlayBrowser.cpp
     src/ui/PlacementDialogs.cpp
     src/ui/PropertiesPanel.cpp
+    src/ui/ProgressWindow.cpp
     src/ui/RoadsExtension.cpp
     src/roads/RoadNetwork.cpp
     src/roads/CityZones.cpp

@@ -21,6 +21,7 @@
 #include "roads/RoadBake.h"
 #include "roads/RoadNetwork.h"
 #include "roads/Prefabs.h"
+#include "ui/ProgressWindow.h"
 #include "roads/RoadRoutes.h"
 #include "terrain/GroundDeform.h"
 #include "terrain/Terrain.h"
@@ -8920,3 +8921,17 @@ void RoadsExtension::Bake() {
 std::unique_ptr<EditorExtension> CreateRoadsExtension(MainWindow& window) {
     return std::make_unique<RoadsExtension>(window);
 }
+    // The bake runs on the editor's thread, so the window cannot redraw: a
+    // progress window says what it is doing.
+    ProgressWindow progress(app_.Window(), L"Baking into the game", 10);
+    progress.Step(L"Writing the traffic and GPS routes...");
+    progress.Step(L"Building the roads, buildings and ground...");
+    progress.Step(Fmt(L"Placing %zu street lights, trees, props and buildings...", poles.size()));
+    progress.Step(L"Making the roads' collision...");
+    progress.Step(L"Fitting the ground's collision...");
+    progress.Step(L"Writing the placements and collision (the region reloads)...");
+        progress.Step(L"Writing the sculpted ground...");
+    progress.Step(L"Taking out the last bake...");
+    progress.Step(Fmt(L"Writing %zu road and ground pieces into the game (the region reloads)...", pieces.size()));
+    progress.Step(L"Lighting the game's own objects...");
+    progress.Close();
