@@ -7,6 +7,8 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <array>
+#include <string>
 #include <cctype>
 #include <cmath>
 #include <unordered_map>
@@ -238,6 +240,8 @@ bool ReadObjMeshes(const std::wstring& path, std::vector<ObjMesh>& out,
     current.name = "object";
     std::string currentMaterial;
     std::unordered_map<Corner, u16, CornerHash> seen;
+    std::unordered_map<std::string, Vec3> faceNormals;   // per object: corner set -> facing
+    size_t backFaces = 0;
 
     const auto finishGroup = [&]() {
         if (current.groups.empty()) return;
@@ -251,6 +255,7 @@ bool ReadObjMeshes(const std::wstring& path, std::vector<ObjMesh>& out,
             out.push_back(std::move(current));
         current = ObjMesh{};
         seen.clear();
+        faceNormals.clear();
         currentMaterial.clear();
     };
 
@@ -359,6 +364,33 @@ bool ReadObjMeshes(const std::wstring& path, std::vector<ObjMesh>& out,
 
             if (corners.size() < 3) continue;
 
+            // A face lying back to back on one already read (the same corners,
+            // facing the other way: a mesh tool's two-sided copy) is left out.
+            // The game's world shaders draw both sides anyway, and the pair
+            // z-fights in the game; lifting one apart still flickers from a
+            // distance, so the back one goes.
+            {
+                std::vector<std::array<long, 3>> key;
+                Vec3 normal{};
+                for (size_t i = 0; i < corners.size(); ++i) {
+                    const Vec3& a = current.positions[corners[i]];
+                    const Vec3& b = current.positions[corners[(i + 1) % corners.size()]];
+                    normal.x += (a.y - b.y) * (a.z + b.z);
+                    normal.y += (a.z - b.z) * (a.x + b.x);
+                    normal.z += (a.x - b.x) * (a.y + b.y);
+                    key.push_back({ std::lround(a.x * 1000.0f), std::lround(a.y * 1000.0f), std::lround(a.z * 1000.0f) });
+                }
+                std::sort(key.begin(), key.end());
+                std::string packed(reinterpret_cast<const char*>(key.data()), key.size() * sizeof(key[0]));
+                const auto earlier = faceNormals.find(packed);
+                if (earlier == faceNormals.end()) {
+                    faceNormals.emplace(std::move(packed), normal);
+                } else if (Dot(earlier->second, normal) < 0.0f) {
+                    ++backFaces;
+                    continue;
+                }
+            }
+
             // A face with more than three corners becomes a fan. OBJ allows any
             // convex polygon and the game draws triangles only.
             if (current.groups.empty()) {
@@ -384,5 +416,6 @@ bool ReadObjMeshes(const std::wstring& path, std::vector<ObjMesh>& out,
     }
 
     LOG_INFO("read %zu meshes from the OBJ", out.size());
+    if (backFaces) LOG_INFO("left out %zu faces lying back to back on another (they z-fight in the game)", backFaces);
     return true;
 }

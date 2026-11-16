@@ -347,8 +347,12 @@ void Network::PlaceBuildings(std::vector<Pole>& poles, std::vector<MeshPiece>& p
                     Box inner = box;
                     inner.hu = std::max(0.5f, box.hu - 0.3f);
                     inner.hv = std::max(0.5f, box.hv - 0.3f);
+                    // Walls of the model's height, not a barrier: a barrier
+                    // stands +/-127 m and would wall off a road passing over
+                    // or under the building.
                     CollisionWall wall;
-                    wall.barrier = true;
+                    wall.barrier = false;
+                    wall.height = std::clamp(m.max.z - m.min.z, 3.0f, 100.0f);
                     wall.surface = kSurfaceWall;
                     for (int k = 0; k <= 4; ++k) {
                         Vec3 c = inner.Corner(k % 4);

@@ -553,6 +553,37 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
             }
             // A guardrail ends where the wall has mostly lowered away.
             if (taper.WallClosed(side, s0.distance) > 0.5f || taper.WallClosed(side, s1.distance) > 0.5f) continue;
+            if (p.wallStyle == 3) {
+                // The game's highway wall (TRN_CS_PROPSA/PROPSB_..._CHOP_R11):
+                // a concrete jersey barrier at the road's edge and a wavy panel
+                // standing on it, 1 m deep, capped by a beam. The profile is the
+                // game's own, measured from its mesh: across (outwards from the
+                // road's edge) and up from the road or sidewalk, with its
+                // texture u at each point; the textures run 39.6 m a repeat
+                // along the wall, as there.
+                struct Face { float x0, h0, u0, x1, h1, u1; const char* texture; };
+                static const Face faces[] = {
+                    { 0.00f, 0.00f, 0.0f, 0.13f, 0.99f, 1.0f, "ARC_BARRIERTYPEFWY_WH" },   // barrier, road side
+                    { 0.13f, 0.99f, 0.0f, 0.49f, 0.94f, 1.0f, "ARC_BARRIERTYPEFWY_WH" },   // barrier top
+                    { 0.49f, 0.94f, 2.0f, 0.56f, 3.91f, 3.0f, "ARC_FWY_WALL_A" },          // panel, road side
+                    { 0.56f, 3.91f, 2.0f, 1.55f, 3.89f, 1.0f, "ARC_A_CROSSBEAM_GR" },      // the cap
+                    { 1.55f, 3.89f, 1.0f, 1.49f, -0.30f, -0.42f, "ARC_FWY_WALL_A" },       // panel, outside, into the ground
+                };
+                const float w0 = s0.distance / 39.6f, w1 = s1.distance / 39.6f;
+                const Vec3 outward0 = s0.right * (float)side, outward1 = s1.right * (float)side;
+                for (const Face& f : faces) {
+                    MeshGroup& fg = piece.Group(f.texture);
+                    const float dx = f.x1 - f.x0, dh = f.h1 - f.h0;
+                    const float len = std::max(1e-4f, std::sqrt(dx * dx + dh * dh));
+                    const Vec3 n0 = (outward0 * -dh + up * dx) * (1.0f / len);
+                    const Vec3 n1 = (outward1 * -dh + up * dx) * (1.0f / len);
+                    AddQuad(fg, Vertex(at(s0, x + f.x0 * side, base0 + f.h0), n0, f.u0, w0, color),
+                            Vertex(at(s0, x + f.x1 * side, base0 + f.h1), n0, f.u1, w0, color),
+                            Vertex(at(s1, x + f.x1 * side, base1 + f.h1), n1, f.u1, w1, color),
+                            Vertex(at(s1, x + f.x0 * side, base1 + f.h0), n1, f.u0, w1, color), n0);
+                }
+                continue;
+            }
             (void)base;
             // A guardrail: a W-shaped steel beam, its profile scaled to the
             // wall height, on posts every two units.
@@ -660,7 +691,7 @@ void BuildStretch(const RoadProfile& p, const std::vector<Station>& stations, si
         // throws a car back onto the road instead of stopping it.
         CollisionWall wall;
         wall.barrier = false;
-        wall.height = std::max(1.0f, p.wallHeight);
+        wall.height = p.wallStyle == 3 ? 3.9f : std::max(1.0f, p.wallHeight);
         for (size_t i : picks) {
             const float d = stations[i].distance;
             if (!taper.WallAt(side, d, d) || taper.WallClosed(side, d) > 0.6f) {
@@ -3755,7 +3786,11 @@ std::vector<MeshPiece> Network::BuildMesh(std::vector<Pole>* polesOut) const {
             if (c0.wallLeft && c1.wallRight) {
                 CollisionWall wall;
                 for (const Vec3& point : outer) wall.points.push_back(point + Vec3{ 0.0f, 0.0f, height });
-                wall.barrier = true;
+                // A wall of real height, as along the roads: a barrier (flags
+                // 0x16) stands +/-127 m and walls off any road above or below
+                // the junction -- the game keeps those for ground-level edges.
+                wall.barrier = false;
+                wall.height = std::max(1.0f, c0.profile->wallHeight);
                 piece.walls.push_back(wall);
 
                 const RoadProfile& p = *c0.profile;
@@ -4166,7 +4201,7 @@ bool Network::Load(const std::wstring& path) {
                         p.medianTexture = Untoken(medianTexture);
                         p.sidewalkLeft = walkLeft != 0;
                         p.sidewalkRight = walkRight != 0;
-                        p.wallStyle = std::clamp(p.wallStyle, 0, 2);
+                        p.wallStyle = std::clamp(p.wallStyle, 0, 3);
                         p.wallModel = Untoken(wallModel);
                         int traffic = 1, gps = 1;
                         if (line >> traffic >> gps >> p.speedLimit) {

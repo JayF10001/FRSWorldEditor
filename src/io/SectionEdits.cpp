@@ -433,6 +433,20 @@ bool DiffSectionBytes(const nfs::World& world, const nfs::Section& section, Byte
             case nfs::kChunkFlarePack:
                 out.push_back(FlaresEdit(b));
                 break;
+            case 0x00034027: {
+                // Breakable props switched off by an empty region's write
+                // (SwitchedOff): only the count differs, and BuildSection does
+                // it again from the shipped chunk. Anything else is unknown.
+                size_t first = SIZE_MAX, last = 0;
+                if (a->whole.size == b.whole.size)
+                    for (size_t i = 0; i < b.whole.size; ++i)
+                        if (a->whole.data[i] != b.whole.data[i]) { first = std::min(first, i); last = i; }
+                if (first != SIZE_MAX && last - first < 4) break;
+                SectionEdit other;
+                other.detail = L"chunk 00034027 differs";
+                out.push_back(std::move(other));
+                break;
+            }
             default: {
                 SectionEdit other;
                 wchar_t text[64];
@@ -446,9 +460,43 @@ bool DiffSectionBytes(const nfs::World& world, const nfs::Section& section, Byte
     return true;
 }
 
+// An empty region (World::EmptyCity): a shipped chunk of the city's light
+// flares (0x80135100), placed effects (0x35020) or breakable-prop spawners
+// (0x34027) in a section being written, switched off where it is -- its count
+// zeroed, nothing moved. False for any other chunk.
+constexpr u32 kChunkSpawners = 0x00034027;
+bool SwitchedOff(const TopChunk& top, std::vector<u8>& out) {
+    if (top.id != nfs::kChunkFlarePack && top.id != nfs::kChunkEmitters && top.id != kChunkSpawners) return false;
+    out.assign(top.whole.data, top.whole.data + top.whole.size);
+    const auto payload = [&](size_t header, size_t end) {
+        size_t p = header + 8;
+        while (p < end && out[p] == 0x11) ++p;
+        return p;
+    };
+    const auto zero = [&](size_t at, size_t bytes) {
+        if (at + bytes <= out.size()) std::memset(out.data() + at, 0, bytes);
+    };
+    if (top.id == nfs::kChunkFlarePack) {
+        for (size_t at = 8; at + 8 <= out.size();) {
+            u32 id = 0, size = 0;
+            std::memcpy(&id, out.data() + at, 4);
+            std::memcpy(&size, out.data() + at + 4, 4);
+            const size_t end = std::min(out.size(), at + 8 + (size_t)size);
+            if (id == nfs::kChunkFlareHeader) zero(payload(at, end) + 0x50, 2);   // u16 flare count
+            at = end;
+        }
+    } else if (top.id == nfs::kChunkEmitters) {
+        zero(payload(0, out.size()) + 12, 4);   // (section, 0, 6, count)
+    } else {
+        zero(payload(0, out.size()) + 16, 4);   // (11, 11, section, before, count)
+    }
+    return true;
+}
+
 bool BuildSection(const nfs::World& world, const nfs::Section& section,
                   const std::vector<SectionEdit>& edits, std::vector<u8>& out,
                   std::wstring& error) {
+    const bool emptyCity = world.EmptyCity() && !(section.number >= 2400 && section.number < 2700);
     const ByteSpan stream = world.StreamBytes();
     if (section.originalStreamOffset + (u64)section.originalStreamSize > stream.size) {
         error = L"The shipped section is not in the stream file.";
@@ -529,7 +577,11 @@ bool BuildSection(const nfs::World& world, const nfs::Section& section,
                     placed.push_back(std::move(p));
                 } else if (edit.kind == SectionEdit::Kind::NativeDeleted ||
                            edit.kind == SectionEdit::Kind::NativeChanged) {
-                    replaced.push_back({ edit.index, edit.record });
+                    // A removal saved before DeletedRecord cleared flag 0x0100
+                    // is brought up to date: the game ignores the zeroed
+                    // matrix of a world-space mesh and kept drawing it.
+                    replaced.push_back({ edit.index, edit.kind == SectionEdit::Kind::NativeDeleted
+                                                         ? nfs::DeletedRecord(edit.record) : edit.record });
                 }
             }
             if (placed.empty() && replaced.empty()) continue;
@@ -545,15 +597,15 @@ bool BuildSection(const nfs::World& world, const nfs::Section& section,
             const SectionEdit* flares = nullptr;
             for (const SectionEdit& edit : edits)
                 if (edit.kind == SectionEdit::Kind::Flares && edit.order == top.order) flares = &edit;
-            if (!flares) continue;
-            splice.bytes = MakeFlarePack(flares->record, top.fileOffset);
+            if (flares) splice.bytes = MakeFlarePack(flares->record, top.fileOffset);
+            else if (!emptyCity || !SwitchedOff(top, splice.bytes)) continue;
         } else if (top.id == nfs::kChunkEmitters) {
             const SectionEdit* effects = nullptr;
             for (const SectionEdit& edit : edits)
                 if (edit.kind == SectionEdit::Kind::Emitters && edit.order == top.order) effects = &edit;
-            if (!effects) continue;
-            splice.bytes = WrapChunk(nfs::kChunkEmitters, effects->record, top.fileOffset);
-        } else {
+            if (effects) splice.bytes = WrapChunk(nfs::kChunkEmitters, effects->record, top.fileOffset);
+            else if (!emptyCity || !SwitchedOff(top, splice.bytes)) continue;
+        } else if (!emptyCity || !SwitchedOff(top, splice.bytes)) {
             continue;
         }
         splices.push_back(std::move(splice));

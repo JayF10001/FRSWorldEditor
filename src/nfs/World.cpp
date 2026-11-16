@@ -1,4 +1,5 @@
 #include "nfs/World.h"
+#include "nfs/CustomRegions.h"
 
 #include "io/MeshOverlay.h"
 #include "nfs/Jdlz.h"
@@ -82,6 +83,13 @@ std::vector<std::wstring> World::AvailableRegions(const std::wstring& tracksDire
     } while (::FindNextFileW(handle, &find));
 
     ::FindClose(handle);
+    // The regions the editor made (nfs/CustomRegions.h), read through their source's files.
+    const size_t slash = tracksDirectory.find_last_of(L"\\/");
+    if (slash != std::wstring::npos)
+        for (const CustomRegion& custom : ReadCustomRegions(tracksDirectory.substr(0, slash)))
+            if (std::find(regions.begin(), regions.end(), custom.name) == regions.end() &&
+                std::find(regions.begin(), regions.end(), custom.source) != regions.end())
+                regions.push_back(custom.name);
     std::sort(regions.begin(), regions.end());
     return regions;
 }
@@ -89,14 +97,26 @@ std::vector<std::wstring> World::AvailableRegions(const std::wstring& tracksDire
 bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region) {
     Close();
 
+    // A region the editor made reads the files of the region it copies; its
+    // edits keep its own name (nfs/CustomRegions.h).
+    const size_t slash = tracksDirectory.find_last_of(L"\\/");
+    const std::wstring files =
+        slash == std::wstring::npos ? region : SourceRegion(tracksDirectory.substr(0, slash), region);
+    emptyCity_ = false;
+    if (files != region) {
+        CustomRegion custom;
+        emptyCity_ = FindCustomRegion(tracksDirectory.substr(0, slash), region, custom) && custom.empty;
+        LOG_INFO("region %S: a copy of %S%s", region.c_str(), files.c_str(), emptyCity_ ? ", empty" : "");
+    }
+
     // No layout file named after the region: Underground 1.
-    if (::GetFileAttributesW((tracksDirectory + L"\\" + region + L".BUN").c_str()) == INVALID_FILE_ATTRIBUTES)
+    if (::GetFileAttributesW((tracksDirectory + L"\\" + files + L".BUN").c_str()) == INVALID_FILE_ATTRIBUTES)
         return OpenUnderground1(tracksDirectory, region);
 
-    if (!layout_.Open(tracksDirectory + L"\\" + region + L".BUN"))
+    if (!layout_.Open(tracksDirectory + L"\\" + files + L".BUN"))
         return false;
 
-    if (!stream_.Open(tracksDirectory + L"\\STREAM" + region + L".BUN")) {
+    if (!stream_.Open(tracksDirectory + L"\\STREAM" + files + L".BUN")) {
         layout_.Close();
         return false;
     }
@@ -119,10 +139,25 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
                  overlayFolder_.c_str(), loaded, spans);
     }
 
-    if (!table_.Parse(layout_.Span())) {
+    // Whole regions brought into this one (io/RegionImport.h) live only in the
+    // region file the game is served: its table carries their entries and its
+    // visibility their zones, beside everything the shipped file has at the
+    // same offsets.
+    std::vector<u8> served;
+    if (!overlayFolder_.empty() &&
+        ::GetFileAttributesW((overlayFolder_ + L"\\imports-" + region + L".txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
+        FileMap copy;
+        if (copy.Open(overlayFolder_ + L"\\files\\TRACKS\\" + region + L".BUN")) {
+            const ByteSpan bytes = copy.Span();
+            served.assign(bytes.data, bytes.data + bytes.size);
+            LOG_INFO("region %S: its table and zones read from the served copy (imports)", region.c_str());
+        }
+    }
+    if (!table_.Parse(served.empty() ? layout_.Span() : ByteSpan{ served.data(), served.size() })) {
         Close();
         return false;
     }
+    if (!served.empty()) preculler_.Parse(ByteSpan{ served.data(), served.size() });
 
     // The table corrections come after it is parsed, so a section that moved is
     // looked for where its bytes now are.
@@ -134,7 +169,7 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
         }
     // Edited visibility lists (ui/ZoneTools.h) are spans of the layout file
     // too: the zones are read again from the file as the game will see it.
-    if (layoutEdited) {
+    if (layoutEdited && served.empty()) {   // the served copy has the lists folded in
         const ByteSpan original = layout_.Span();
         std::vector<u8> patched(original.data, original.data + original.size);
         for (const SpanOverlay& span : spans_)
@@ -145,7 +180,10 @@ bool World::Open(const std::wstring& tracksDirectory, const std::wstring& region
 
     OpenGlobalPacks(tracksDirectory);
     ReadRaceBarrierGroups();
-    objectAnimations_.Parse(layout_.Span());
+    // An empty region has none of its source's moving objects (planes, trams,
+    // doors): the region file the game reads has them taken out too
+    // (io/RegionCreate.h, ApplyEmptyRegionLists).
+    if (!emptyCity_) objectAnimations_.Parse(layout_.Span());
 
     region_ = region;
     sectionToLoaded_.assign(table_.Sections().size(), -1);
@@ -433,6 +471,59 @@ const LoadedSection* World::LoadSection(const Section& section) {
     if (IsUnderground1()) {
         const auto found = trackCollision_.find(section.number);
         if (found != trackCollision_.end()) loadedSection->collision.push_back(found->second);
+    }
+
+    // An empty region (nfs/CustomRegions.h): none of the source's city. Every
+    // shipped object of a positioned section counts as removed -- hidden here,
+    // and written with its matrix zeroed whenever the section is saved -- and
+    // the shipped collision of a section the editor has not written yet starts
+    // empty; one it wrote holds its own collision already. The libraries (X, Y,
+    // Z: models with no place of their own) stay as they are.
+    // In the libraries, what the game hides until a scenery group or an
+    // animation shows it (instance flag 0x10: the jumbo planes in Z0, shown
+    // only by their animation, which an empty region does not have).
+    if (emptyCity_ && section.number >= 2400 && section.number < 2700)
+        for (const SceneryInstance& instance : loadedSection->scenery.instances) {
+            if (instance.flags & 0x10) {
+                loadedSection->removedNatives.push_back({ instance.sceneryNumber, instance.record });
+                continue;
+            }
+            const SolidObject* model = FindModel(loadedSection->scenery.ModelHash(instance));
+            LOG_INFO("empty region: %s keeps %s (flags %04X): always loaded", section.name.c_str(),
+                     model ? model->name.c_str() : "?", instance.flags);
+        }
+    if (emptyCity_ && !(section.number >= 2400 && section.number < 2700)) {
+        for (const SceneryInstance& instance : loadedSection->scenery.instances) {
+            loadedSection->removedNatives.push_back({ instance.sceneryNumber, instance.record });
+            // A written section whose shipped objects are still in it (an
+            // import rebuilt it from its bytes) still has the city: pending.
+            const Mat4& m = instance.transform;
+            bool zeroed = true;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) zeroed = zeroed && m.m[r][c] == 0.0f;
+            if (fromSpan && !zeroed) loadedSection->emptyPending = true;
+        }
+        // The shipped collision starts empty. A written section keeps the
+        // packs the editor wrote and loses the ones still as shipped.
+        std::vector<u32> shippedPacks;
+        if (fromSpan && section.originalStreamOffset + (u64)section.originalStreamSize <= stream_.Size()) {
+            ChunkReader shipped(stream_.Span().sub(section.originalStreamOffset, section.originalStreamSize),
+                                section.originalStreamOffset);
+            Chunk chunk;
+            while (shipped.Next(chunk)) {
+                if (chunk.id != kChunkCollisionPack) continue;
+                CollisionPack pack;
+                if (ParseCollision(chunk, pack)) shippedPacks.push_back(CollisionFingerprint(pack));
+            }
+        }
+        for (size_t k = 0; k < loadedSection->collision.size(); ++k) {
+            CollisionPack& pack = loadedSection->collision[k];
+            const bool asShipped = !fromSpan || (k < shippedPacks.size() && CollisionFingerprint(pack) == shippedPacks[k]);
+            if (!asShipped || pack.polygons.empty()) continue;
+            pack.polygons.clear();
+            pack.gridRank.clear();
+            if (fromSpan) loadedSection->emptyPending = true;
+        }
     }
 
     if (loadedSection->solidLists.empty() && loadedSection->texturePacks.empty() &&

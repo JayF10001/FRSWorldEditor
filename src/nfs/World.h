@@ -49,6 +49,11 @@ struct LoadedSection {
     // their matrix zeroed.
     std::vector<std::pair<u32, u32>> removedNatives;
 
+    // An empty region (World::EmptyCity): a section written earlier that still
+    // carries some of the source's city on disk -- shipped objects not zeroed,
+    // a collision pack as shipped. Saving it again takes the city out.
+    bool emptyPending = false;
+
     // Collision edited in the editor and not written yet: the packs (indices
     // into `collision`) whose polygons differ from what is on disk.
     bool collisionChanged = false;
@@ -121,6 +126,9 @@ public:
 
     Game GameKind() const { return game_; }
     bool IsUnderground1() const { return game_ == Game::Underground1; }
+    // An empty region the editor made (nfs/CustomRegions.h): its source's city
+    // hidden, and taken out of every section it saves.
+    bool EmptyCity() const { return emptyCity_; }
     // Underground 1: the track whose bundle the region was opened with.
     u32  TrackNumber() const { return trackNumber_; }
 
@@ -252,6 +260,7 @@ public:
 
 private:
     std::wstring region_;
+    bool emptyCity_ = false;
     FileMap      layout_;   // L4Rx.BUN
     std::vector<u8> layoutUnpacked_;   // Underground 1: the unpacked TRACKB<n>.LZC
     ByteSpan LayoutSpan() const {

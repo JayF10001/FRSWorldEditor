@@ -9,6 +9,7 @@
 // sees the roads once they are baked.
 
 #include "ui/RoadsExtension.h"
+#include "nfs/CustomRegions.h"
 
 #include "core/Log.h"
 #include "io/CollisionEdit.h"
@@ -22,6 +23,7 @@
 #include "roads/RoadNetwork.h"
 #include "roads/Prefabs.h"
 #include "ui/ProgressWindow.h"
+#include "io/SelectionImport.h"
 #include "roads/RoadRoutes.h"
 #include "terrain/GroundDeform.h"
 #include "terrain/Terrain.h"
@@ -200,7 +202,7 @@ constexpr int kHandleBits    = kHandleAtStart | kHandleAtEnd;
 
 const wchar_t* const kSideNames[5] = { L"right", L"left", L"both", L"alternating", L"median" };
 const wchar_t* const kMedianNames[5] = { L"none", L"painted", L"concrete", L"grass", L"barrier" };
-const wchar_t* const kWallStyleNames[3] = { L"flat", L"guardrail", L"model" };
+const wchar_t* const kWallStyleNames[4] = { L"flat", L"guardrail", L"model", L"highway wall" };
 
 // A picture for the properties panel: `bgra` (top row first) fitted into a
 // `box`-pixel square on the panel's colour.
@@ -5111,7 +5113,7 @@ private:
         // records, the class name first).
         std::vector<std::string> classes;
         {
-            const std::wstring path = app_.GameFolder() + L"\\TRACKS\\" + world.Region() + L".BUN";
+            const std::wstring path = nfs::ShippedTrackFile(app_.GameFolder(), world.Region(), world.Region() + L".BUN");
             std::ifstream in(path, std::ios::binary);
             std::vector<char> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             size_t off = 0;
@@ -6606,6 +6608,14 @@ private:
     // lights where there is none.
     void SetGameLight(const nfs::World& world) {
         auto sources = std::make_shared<roads::Network::LightSources>();
+        // An empty region (nfs/CustomRegions.h): the city's ground and lamps are
+        // not there, so they light nothing -- the ambient alone.
+        if (world.EmptyCity()) {
+            LOG_INFO("roads: an empty region -- no game light to take");
+            network_.SetLightSources(sources);
+            light_ = sources;
+            return;
+        }
         sources->sample = [this](const Vec3& p, u32& colour) { return GameLightAt(p, colour); };
         for (const auto& loaded : world.Loaded())
             for (const nfs::SceneryInstance& instance : loaded->scenery.instances) {
@@ -6750,7 +6760,7 @@ private:
         nfs::World* world = app_.World();
         if (!world) return false;
         const std::wstring region = world->Region();
-        const std::wstring shipped = app_.GameFolder() + L"\\TRACKS\\ROUTES" + region + L"\\RoutesFreeRoam.bin";
+        const std::wstring shipped = nfs::ShippedTrackFile(app_.GameFolder(), region, L"ROUTES" + region + L"\\RoutesFreeRoam.bin");
         const std::wstring folder = app_.ModelsFolder() + L"\\files\\TRACKS\\ROUTES" + region;
         const std::wstring served = folder + L"\\RoutesFreeRoam.bin";
         std::vector<u8> bytes;
@@ -6849,7 +6859,7 @@ private:
         if (graphBuilt_ == network_.Revision() && graphRegion_ == world->Region()) return;
         if (graphRegion_ != world->Region() || graphShipped_.empty()) {
             graphShipped_.clear();
-            std::ifstream in(app_.GameFolder() + L"\\TRACKS\\ROUTES" + world->Region() + L"\\RoutesFreeRoam.bin",
+            std::ifstream in(nfs::ShippedTrackFile(app_.GameFolder(), world->Region(), L"ROUTES" + world->Region() + L"\\RoutesFreeRoam.bin"),
                              std::ios::binary);
             if (in) graphShipped_.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
             graphRegion_ = world->Region();
@@ -7917,10 +7927,11 @@ void RoadsExtension::FillRoad(PropertiesPanel::View& view, const roads::Segment&
            walks_, true);
     AddRow(view, L"Walls", L"Left wall", p.wallLeft ? L"yes" : L"no", L"Along the left edge.", kWallLeft, yesNo);
     AddRow(view, L"Walls", L"Right wall", p.wallRight ? L"yes" : L"no", L"Along the right edge.", kWallRight, yesNo);
-    AddRow(view, L"Walls", L"Style", kWallStyleNames[std::clamp(p.wallStyle, 0, 2)],
+    AddRow(view, L"Walls", L"Style", kWallStyleNames[std::clamp(p.wallStyle, 0, 3)],
            L"flat: a straight wall; guardrail: a steel W-beam on posts; model: a game model repeated along the "
-           L"edge, turned to follow its curve. Every style collides as a wall nothing gets over.", kWallStyle,
-           { kWallStyleNames[0], kWallStyleNames[1], kWallStyleNames[2] });
+           L"edge, turned to follow its curve; highway wall: the game's own freeway wall, a concrete barrier with "
+           L"a wavy panel on it (its own size and textures). Every style collides as a wall nothing gets over.",
+           kWallStyle, { kWallStyleNames[0], kWallStyleNames[1], kWallStyleNames[2], kWallStyleNames[3] });
     if (p.wallStyle == 2) {
         AddRow(view, L"Walls", L"Model", p.wallModel.empty() ? L"-" : Widen(p.wallModel),
                L"Rails, fences and barriers of the region. Its length sets the spacing when picked.", kWallModel,
@@ -8372,7 +8383,7 @@ void RoadsExtension::ApplyRoad(roads::RoadProfile& p, int only) {
     if (readText(kWalkLeft, text)) p.sidewalkLeft = !text.empty() && (text[0] == L'y' || text[0] == L'Y');
     if (readText(kWalkRight, text)) p.sidewalkRight = !text.empty() && (text[0] == L'y' || text[0] == L'Y');
     if (readText(kWallStyle, text))
-        for (int k = 0; k < 3; ++k)
+        for (int k = 0; k < 4; ++k)
             if (text == kWallStyleNames[k]) p.wallStyle = k;
     if (readText(kWallModel, text)) {
         const std::string name = Narrow(text);
@@ -9977,7 +9988,10 @@ void RoadsExtension::Bake() {
     // The import makes each piece a model in the section under it and
     // reloads the region.
     progress.Step(Fmt(L"Writing %zu road and ground pieces into the game (the region reloads)...", pieces.size()));
+    // Hundreds of pieces take a while: the window keeps answering through them.
+    ImportProgress() = [&progress](size_t done, size_t) { if (done % 4 == 0) progress.Pump(); };
     app_.ImportObj(obj, origin);
+    ImportProgress() = nullptr;
 
     size_t baked = 0;
     if (nfs::World* reloaded = app_.World())

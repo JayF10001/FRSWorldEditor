@@ -4,6 +4,7 @@
 #include "io/MeshOverlay.h"
 #include "io/SectionEdits.h"
 #include "nfs/ChunkIds.h"
+#include "nfs/FreeRoam.h"
 #include "nfs/World.h"
 
 #include <algorithm>
@@ -148,7 +149,15 @@ bool PlanFlares(const nfs::World& world, const std::wstring& modelsFolder, const
                 SetF(r, 0x10, p.x);
                 SetF(r, 0x14, p.y);
                 SetF(r, 0x18, p.z);
-                SetF(r, 0x1C, 999.0f);                       // the reflection's height, worked out by the game
+                // The reflection on the road (eRenderLightFlare 0x490920): 999 =
+                // the game mirrors it about the floor under it (2 * floor - z),
+                // 9999 = none. Retail flares hang 5-15 m over the road; one
+                // higher mirrors far off the road, and one with no floor under
+                // it, or sitting on it, has nothing to mirror in.
+                float floor = 0.0f;
+                const bool overFloor = nfs::GroundBelow(world, p.x, p.y, p.z + 0.5f, floor);
+                const float hang = p.z - floor;
+                SetF(r, 0x1C, overFloor && hang > 0.3f && hang <= 15.0f ? 999.0f : 9999.0f);
                 SetF(r, 0x20, 0.0f);
                 SetF(r, 0x24, 0.0f);
                 SetF(r, 0x28, -1.0f);

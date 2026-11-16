@@ -18,6 +18,7 @@ namespace collision {
 
 namespace {
 
+constexpr u8 kFlagCompare  = 0x01;   // floors: compete by height (see MakeGround)
 constexpr u8 kFlagVertical = 0x02;
 constexpr u8 kFlagQuad     = 0x10;
 constexpr u8 kFlagsBarrier = 0x16;   // every shipped barrier
@@ -123,7 +124,11 @@ nfs::CollisionPolygon MakeGround(const Vec3* corners, int count, u8 surface) {
     for (int c = 0; c < 4; ++c) polygon.corners[c] = outline[(size_t)std::min(c, count - 1)];
     polygon.attributes[0] = 0;
     polygon.attributes[2] = surface;
-    polygon.attributes[3] = (u8)((polygon.quad ? kFlagQuad : 0) | (vertical ? kFlagVertical : 0));
+    // 0x01 on every floor: it makes the floor compete by height with any other
+    // under or over it (without it the first floor the point is strictly
+    // inside wins at any height, and a deck becomes the ground of the street
+    // below). Alone at a point it changes nothing.
+    polygon.attributes[3] = (u8)((polygon.quad ? kFlagQuad : 0) | (vertical ? kFlagVertical : kFlagCompare));
     Finish(polygon);
     return polygon;
 }

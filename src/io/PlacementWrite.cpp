@@ -85,11 +85,18 @@ bool PlanPlacementSave(const nfs::World& world, const std::wstring& modelsFolder
         // Collision edited in the editor: each changed pack re-encoded, grid
         // and all, in place of whatever collision edit the section had.
         size_t collisionPacks = 0, collisionPolygons = 0;
-        if (section.collisionChanged) {
+        // An empty region (nfs/CustomRegions.h): a section written goes out
+        // with every pack as the editor holds it -- the city's collision is
+        // not in it -- not only the ones edited.
+        std::vector<u32> packsToWrite = section.changedCollisionPacks;
+        if (world.EmptyCity())
+            for (u32 p = 0; p < (u32)section.collision.size(); ++p)
+                if (std::find(packsToWrite.begin(), packsToWrite.end(), p) == packsToWrite.end()) packsToWrite.push_back(p);
+        if (section.collisionChanged || (world.EmptyCity() && !packsToWrite.empty())) {
             std::vector<u32> orders;
             collision::CollisionChunkOrders(world, entry, orders);
             bool bad = false;
-            for (const u32 packIndex : section.changedCollisionPacks) {
+            for (const u32 packIndex : packsToWrite) {
                 if (packIndex >= section.collision.size() || packIndex >= orders.size()) {
                     report << name << L": an edited collision pack is not where the loader found it. Left alone.\n";
                     bad = true;

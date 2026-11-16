@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <unordered_set>
 
@@ -97,9 +98,17 @@ size_t WorldFlaresU2::Load(const nfs::World& world) {
     world_ = &world;
     loadedSections_ = world.Loaded().size();
     std::unordered_map<uint32_t, ModelMarkers> models;
+    // An empty region (nfs/CustomRegions.h): none of the city's flares. A
+    // positioned section still as shipped holds only the city's; one the
+    // editor wrote has the city's switched off (count 0) and keeps its own.
+    const ByteSpan stream = world.StreamBytes();
+    const auto cityOnly = [&](const nfs::Section& section, const ByteSpan& bytes) {
+        if (!world.EmptyCity() || (section.number >= 2400 && section.number < 2700)) return false;
+        return bytes.data >= stream.data && bytes.data < stream.data + stream.size;
+    };
     for (const nfs::Section& section : world.Table().Sections()) {
         const ByteSpan s = world.SectionBytes(section);
-        if (s.empty()) continue;
+        if (s.empty() || cityOnly(section, s)) continue;
         ReadModelMarkers(s, models);
         for (const ChunkRef& top : Children(s, 0, s.size)) {
             if (top.id != PackChunk) continue;
@@ -145,8 +154,13 @@ size_t WorldFlaresU2::Load(const nfs::World& world) {
     for (const auto& loaded : world.Loaded()) {
         if (!loaded || !loaded->info) continue;
         const nfs::Scenery& sc = loaded->scenery;
+        const auto& removed = loaded->removedNatives;
         for (const nfs::SceneryInstance& inst : sc.instances) {
             if (inst.flags & 0x10) continue;   // hidden in free roam
+            // Removed in the editor (an empty region removes them all).
+            if (!removed.empty() && std::find(removed.begin(), removed.end(),
+                                              std::make_pair(inst.sceneryNumber, inst.record)) != removed.end())
+                continue;
             const auto it = models.find(sc.ModelHash(inst));
             if (it == models.end()) continue;
             const nfs::SceneryInfo& info = sc.infos[inst.infoIndex];

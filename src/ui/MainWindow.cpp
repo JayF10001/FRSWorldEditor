@@ -7,7 +7,11 @@
 #include "ui/CrashReport.h"
 #include "ui/MeshTools.h"
 #include "drive/DriveMode.h"
+#include "ui/FogTools.h"
+#include "ui/RegionTools.h"
+#include "ui/ImportTools.h"
 #include "ui/HiddenItems.h"
+#include "ui/ReferenceImages.h"
 #include "ui/ZoneTools.h"
 #include "ui/OnlineLibrary.h"
 #include "io/PlacementWrite.h"
@@ -635,6 +639,7 @@ void MainWindow::OnCreate() {
     edits_.collisionLogged = [this](const std::string& section) {
         return collisionTools_ && collisionTools_->LogCovers(section);
     };
+    edits_.onRefreshed = [this] { PushEditedContent(); };
     edits_.onRevertExtra = [this](const void* owner, const std::vector<size_t>& indices) {
         if (EditorExtension* extension = ExtensionOf(owner)) extension->RevertRows(indices);
     };
@@ -713,6 +718,21 @@ void MainWindow::OnCreate() {
         host.menuChecks = [this] { UpdateMenuChecks(); };
         extensions_.push_back(std::make_unique<HiddenItems>(std::move(host)));
     }
+    // Pictures to build over, editor only (ui/ReferenceImages.h).
+    {
+        ReferenceImagesHost host;
+        host.window = window_;
+        host.menu = menu_;
+        host.viewport = &viewport_;
+        host.properties = &properties_;
+        host.world = [this] { return world_.get(); };
+        host.modelsFolder = [this] { return modelsFolder_; };
+        host.status = [this](const std::wstring& text) { SetStatusText(2, text); };
+        host.menuChecks = [this] { UpdateMenuChecks(); };
+        host.updateProperties = [this] { UpdateProperties(); };
+        host.viewCentre = [this](Vec3& point) { return world_ && ViewCentrePoint(point); };
+        extensions_.push_back(std::make_unique<ReferenceImages>(std::move(host)));
+    }
     // The game's visibility zones, seen and their lists edited (ui/ZoneTools.h).
     {
         ZoneToolsHost host;
@@ -737,6 +757,46 @@ void MainWindow::OnCreate() {
         auto zones = std::make_unique<ZoneTools>(std::move(host));
         zoneTools_ = zones.get();
         extensions_.push_back(std::move(zones));
+    }
+    // Fog by neighbourhood (ui/FogTools.h): View > Fog by Neighbourhood.
+    {
+        FogToolsHost host;
+        host.menu = menu_;
+        host.viewport = &viewport_;
+        host.world = [this] { return world_.get(); };
+        host.gameFolder = [this] { return gameFolder_; };
+        host.zones = [this]() -> const std::vector<nfs::CityZone>& { return zones_; };
+        host.travelToZone = [this](size_t index) { TravelToZone(index); };
+        host.status = [this](const std::wstring& text) { SetStatusText(2, text); };
+        host.menuChecks = [this] { UpdateMenuChecks(); };
+        extensions_.push_back(std::make_unique<FogTools>(std::move(host)));
+    }
+    // New regions (ui/RegionTools.h): File > New Region.
+    {
+        RegionToolsHost host;
+        host.window = window_;
+        host.menu = menu_;
+        host.world = [this] { return world_.get(); };
+        host.gameFolder = [this] { return gameFolder_; };
+        host.status = [this](const std::wstring& text) { SetStatusText(2, text); };
+        host.reopenRegions = [this](const std::wstring& region) { ReopenRegions(region); };
+        host.saveEdits = [this] { return SavePlacements(); };
+        extensions_.push_back(std::make_unique<RegionTools>(std::move(host)));
+    }
+    // Whole regions brought into this one (ui/ImportTools.h).
+    {
+        ImportToolsHost host;
+        host.window = window_;
+        host.menu = menu_;
+        host.viewport = &viewport_;
+        host.properties = &properties_;
+        host.world = [this] { return world_.get(); };
+        host.gameFolder = [this] { return gameFolder_; };
+        host.status = [this](const std::wstring& text) { SetStatusText(2, text); };
+        host.updateProperties = [this] { UpdateProperties(); };
+        host.confirmUnsaved = [this] { return ConfirmUnsavedPlacements(); };
+        host.reopenRegion = [this](const std::wstring& region) { ReopenRegions(region); };
+        extensions_.push_back(std::make_unique<ImportTools>(std::move(host)));
     }
     // Collision editing (ui/CollisionTools.h) is part of every build, asked
     // after the build's own extensions.
@@ -770,6 +830,14 @@ void MainWindow::OnCreate() {
         extensions_.push_back(std::make_unique<DriveMode>(std::move(host)));
     }
     for (auto& extension : extensions_) extension->OnCreate();
+    // Alt+E: View > Show Only Edited.
+    if (accelerators_) {
+        const int count = ::CopyAcceleratorTableW(accelerators_, nullptr, 0);
+        std::vector<ACCEL> table((size_t)count);
+        ::CopyAcceleratorTableW(accelerators_, table.data(), count);
+        table.push_back({ (BYTE)(FVIRTKEY | FALT), 'E', (WORD)kViewEditedOnlyCommand });
+        if (HACCEL extended = ::CreateAcceleratorTableW(table.data(), (int)table.size())) accelerators_ = extended;
+    }
 
     // From here the frame is drawn with ImGui (ui/MainWindowShell.cpp): the
     // native menu, toolbar, status bar and side panel stay as hidden sources.
@@ -785,6 +853,8 @@ void MainWindow::OnCreate() {
             ::AppendMenuW(view, MF_STRING, kViewGameLookCommand, L"&Game look (the game's shaders, fog and reflections)");
             ::AppendMenuW(view, MF_STRING, kViewHideBackgroundCommand, L"Hide &background scenery (PAN_ panoramas)");
             ::AppendMenuW(view, MF_STRING, kViewHideDistantLodCommand, L"Hide &distant LOD models (PAN_*_Z, LOD_, _1Z_)");
+            ::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+            ::AppendMenuW(view, MF_STRING, kViewEditedOnlyCommand, L"Show &Only Edited (what you changed)	Alt+E");
             // Remembered between sessions.
             for (auto [name, set] : { std::pair<const wchar_t*, void (WorldRenderer::*)(bool)>{
                                           L"HideBackgroundScenery", &WorldRenderer::SetBackgroundSceneryHidden },
@@ -1067,6 +1137,22 @@ void MainWindow::OnCommand(int id, int notification, HWND control) {
     }
     if (id == kViewAnimationsCommand) {
         viewport_.GetRenderer().SetAnimationsEnabled(!viewport_.GetRenderer().AnimationsEnabled());
+        UpdateMenuChecks();
+        return;
+    }
+    if (id == kViewEditedOnlyCommand) {
+        WorldRenderer& renderer = viewport_.GetRenderer();
+        renderer.SetEditedOnly(!renderer.EditedOnly());
+        if (renderer.EditedOnly()) {
+            PushEditedContent();
+            // Whatever is selected may be gone from the view now.
+            renderer.ClearSelection();
+            UpdateProperties();
+        }
+        SetStatusText(2, renderer.EditedOnly()
+                             ? L"Showing only what you changed: placed and moved objects, edited meshes and "
+                               L"textures, and the extensions' own (roads, markers...). Alt+E shows all again."
+                             : L"Showing the whole world again.");
         UpdateMenuChecks();
         return;
     }
@@ -2533,9 +2619,27 @@ void MainWindow::SetGameFolder(const std::wstring& folder) {
     SetStatusText(0, Format(L"%zu regions available", regions.size()));
 
     if (!regions.empty()) {
-        ::SendMessageW(regionCombo_, CB_SETCURSEL, 0, 0);
-        OpenRegion(regions.front());
+        // FRS_REGION=<name> opens that region first (tests), else the first one.
+        size_t first = 0;
+        if (const wchar_t* wanted = _wgetenv(L"FRS_REGION"))
+            for (size_t i = 0; i < regions.size(); ++i)
+                if (regions[i] == wanted) first = i;
+        ::SendMessageW(regionCombo_, CB_SETCURSEL, (WPARAM)first, 0);
+        OpenRegion(regions[first]);
     }
+}
+
+void MainWindow::ReopenRegions(const std::wstring& region) {
+    ::SendMessageW(regionCombo_, CB_RESETCONTENT, 0, 0);
+    const auto regions = nfs::World::AvailableRegions(tracksFolder_);
+    int select = 0;
+    for (size_t i = 0; i < regions.size(); ++i) {
+        ::SendMessageW(regionCombo_, CB_ADDSTRING, 0, (LPARAM)regions[i].c_str());
+        if (regions[i] == region) select = (int)i;
+    }
+    if (regions.empty()) return;
+    ::SendMessageW(regionCombo_, CB_SETCURSEL, (WPARAM)select, 0);
+    OpenRegion(regions[(size_t)select]);
 }
 
 void MainWindow::OpenRegion(std::wstring region) {
@@ -3079,7 +3183,25 @@ void MainWindow::UpdateMenuChecks() {
                     MF_BYCOMMAND | (viewport_.GetRenderer().BackgroundSceneryHidden() ? MF_CHECKED : MF_UNCHECKED));
     ::CheckMenuItem(menu_, kViewHideDistantLodCommand,
                     MF_BYCOMMAND | (viewport_.GetRenderer().DistantLodHidden() ? MF_CHECKED : MF_UNCHECKED));
+    ::CheckMenuItem(menu_, kViewEditedOnlyCommand,
+                    MF_BYCOMMAND | (viewport_.GetRenderer().EditedOnly() ? MF_CHECKED : MF_UNCHECKED));
     for (auto& extension : extensions_) extension->UpdateMenuChecks(menu_);
+}
+
+void MainWindow::PushEditedContent() {
+    EditsPanel::EditedContent edited = edits_.Edited();
+    std::set<std::string> natives;
+    if (world_)
+        for (const auto& [sectionName, sceneryNumber, record] : edited.natives)
+            for (const auto& loaded : world_->Loaded()) {
+                if (!loaded->info || loaded->info->name != sectionName) continue;
+                const auto& instances = loaded->scenery.instances;
+                for (size_t n = 0; n < instances.size(); ++n)
+                    if (instances[n].sceneryNumber == sceneryNumber && instances[n].record == record)
+                        natives.insert("N " + sectionName + " " + std::to_string(n));
+            }
+    viewport_.GetRenderer().SetEditedContent(std::move(edited.models), std::move(edited.textures),
+                                             std::move(natives));
 }
 
 void MainWindow::SetStatusText(int part, const std::wstring& text) {

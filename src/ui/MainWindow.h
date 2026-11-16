@@ -98,6 +98,8 @@ private:
     // and callers naturally pass the name out of the world it is about to
     // destroy.
     void OpenRegion(std::wstring region);
+    // The region list read again (a region was made or removed), then `region` opened.
+    void ReopenRegions(const std::wstring& region);
 
     // Asks where to put it, then writes the selection as OBJ + MTL + a JSON
     // manifest for Blender.
@@ -266,7 +268,11 @@ private:
     static constexpr UINT kStopGameMessage = WM_APP + 0x55;
     // View > Sky and View > Animations (added to the View menu at start).
     static constexpr int kViewSkyCommand = 44601, kViewAnimationsCommand = 44602, kViewGameLookCommand = 44603,
-                         kViewHideBackgroundCommand = 44604, kViewHideDistantLodCommand = 44605;
+                         kViewHideBackgroundCommand = 44604, kViewHideDistantLodCommand = 44605,
+                         kViewEditedOnlyCommand = 44606;
+    // View > Show Only Edited: hands the Edits list's models, textures and
+    // records to the renderer's filter.
+    void PushEditedContent();
     void StopGame();
     static constexpr UINT kShellLibraryActivate = WM_APP + 0x52;
 

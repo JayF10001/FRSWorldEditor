@@ -1,6 +1,7 @@
 #include "render/WorldRenderer.h"
 
 #include "core/Log.h"
+#include "io/DistrictFog.h"
 #include "render/RenderExtension.h"
 #include "render/GameLook.h"
 
@@ -273,6 +274,7 @@ void WorldRenderer::BuildInstances(const nfs::World& world) {
 void WorldRenderer::RebuildInstances(const nfs::World& world) {
     if (world_ != &world) return;
     BuildInstances(world);
+    ++hiddenVersion_;   // the per-instance flags follow the new lists
 }
 
 void WorldRenderer::UpdatePlacement(u32 loadedSection, int placement, const Mat4& transform) {
@@ -637,8 +639,10 @@ void WorldRenderer::Render(const Camera& camera) {
         }
 
         const Aabb cullBounds = section.CullBounds(showLibrary_);
+        const bool previewed = Previewed(section.number);   // SetSectionPreview: bounds are stale
 
-        if (usingVisibility) {
+        if (previewed) {
+        } else if (usingVisibility) {
             if (!std::binary_search(visibleSections_.begin(), visibleSections_.end(),
                                     section.number))
                 continue;
@@ -652,7 +656,7 @@ void WorldRenderer::Render(const Camera& camera) {
             const float dy = centre.y - camera.Position().y;
             if (dx * dx + dy * dy > streamRadius_ * streamRadius_) continue;
         }
-        if (culling_ && cullBounds.Valid() && !frustum.Intersects(cullBounds)) continue;
+        if (!previewed && culling_ && cullBounds.Valid() && !frustum.Intersects(cullBounds)) continue;
         stats.sectionsVisible++;
 
         // The stored meshes, at the storage transforms in their headers. This is
@@ -684,7 +688,7 @@ void WorldRenderer::Render(const Camera& camera) {
         for (size_t k = 0; k < section.instances.size(); ++k) {
             const GpuInstance& instance = section.instances[k];
             if (hiddenHere[k]) continue;   // hidden in the editor
-            if (culling_ && instance.worldBounds.Valid() &&
+            if (!previewed && culling_ && instance.worldBounds.Valid() &&
                 !frustum.Intersects(instance.worldBounds)) continue;
 
             const GpuObject& object = sections_[instance.section].gpu->Objects()[instance.object];
@@ -702,11 +706,12 @@ void WorldRenderer::Render(const Camera& camera) {
                                        instance.mirrored ? OppositeCull(cullMode_)
                                                          : cullMode_);
 
-            const D3DMATRIX world = ToD3D(instance.transform);
+            const Mat4 placed = previewed ? instance.transform * previewDelta_ : instance.transform;
+            const D3DMATRIX world = ToD3D(placed);
             device->SetTransform(D3DTS_WORLD, &world);
             if (DrawObject(device, object, stats))
-                QueueTranslucent(object, instance.section, instance.transform, instance.mirrored,
-                                 instance.worldBounds, eye);
+                QueueTranslucent(object, instance.section, placed, instance.mirrored,
+                                 previewed ? Transform(instance.worldBounds, previewDelta_) : instance.worldBounds, eye);
         }
     }
 
@@ -1002,9 +1007,28 @@ const std::vector<char>& WorldRenderer::HiddenFlags(size_t i) const {
                     InstanceKey(section.name, section.instances[k].native, section.instances[k].placement);
                 if (!key.empty() && hiddenKeys_.count(key)) section.hidden[k] = 1;
             }
+        if (editedOnly_)
+            for (size_t k = 0; k < section.instances.size(); ++k)
+                if (!InstanceEdited(section, section.instances[k])) section.hidden[k] = 1;
         section.hiddenVersion = hiddenVersion_;
     }
     return section.hidden;
+}
+
+bool WorldRenderer::InstanceEdited(const SectionRender& section, const GpuInstance& instance) const {
+    if (instance.placement >= 0) return true;    // made or moved in the editor
+    if (instance.native >= 0 && !editedNatives_.empty() &&
+        editedNatives_.count(InstanceKey(section.name, instance.native, -1)))
+        return true;
+    if (instance.section >= sections_.size() || !sections_[instance.section].gpu) return false;
+    const auto& objects = sections_[instance.section].gpu->Objects();
+    if (instance.object >= objects.size() || !objects[instance.object].source) return false;
+    const nfs::SolidObject& model = *objects[instance.object].source;
+    if (editedModels_.count(model.hash)) return true;
+    if (!editedTextures_.empty())
+        for (const u32 texture : model.textureHashes)
+            if (editedTextures_.count(texture)) return true;
+    return false;
 }
 
 bool WorldRenderer::Pick(const Ray& ray, PickResult& out) const {
@@ -2086,9 +2110,10 @@ void WorldRenderer::BeginGameLook(IDirect3DDevice9* device, const Mat4& view, co
             for (wchar_t ch : world_->Region()) region += (char)ch;
         if (region != fogRegion_) {
             fogRegion_ = region;
-            std::wstring bun = gameFolder_;
-            if (!bun.empty() && bun.back() != L'\\' && bun.back() != L'/') bun += L'\\';
-            bun += L"TRACKS\\" + std::wstring(region.begin(), region.end()) + L".BUN";
+            std::wstring folder = gameFolder_;
+            while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) folder.pop_back();
+            // The copy the game will read when the world has one (fog by neighbourhood, io/DistrictFog).
+            const std::wstring bun = io::RegionFileForGame(folder, std::wstring(region.begin(), region.end()));
             if (glFogMap_.Load(bun))
                 LOG_INFO("game look: fog from the \"Normal Fog\" parameter map of %S", bun.c_str());
             else

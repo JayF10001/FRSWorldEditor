@@ -32,8 +32,12 @@ add_executable(FRSWorldEditor WIN32
     src/io/WorldFile.cpp
     src/io/WorldPublish.cpp
     src/io/MarkerWrite.cpp
+    src/io/DistrictFog.cpp
+    src/io/RegionCreate.cpp
+    src/io/RegionImport.cpp
     src/io/MarkerEffects.cpp
     src/io/LightFlares.cpp
+    src/nfs/CustomRegions.cpp
     src/nfs/Markers.cpp
     src/ui/MarkersExtension.cpp
     src/io/SelectionExport.cpp
@@ -72,6 +76,11 @@ add_executable(FRSWorldEditor WIN32
     src/ui/EmbeddedGame.cpp
     src/ui/CrashReport.cpp
     src/ui/HiddenItems.cpp
+    src/ui/FogTools.cpp
+    src/ui/RegionTools.cpp
+    src/ui/ImportTools.cpp
+    src/terrain/Procedural.cpp
+    src/ui/ReferenceImages.cpp
     src/ui/ZoneTools.cpp
     src/ui/MainWindow.cpp
     src/ui/MainWindowShell.cpp
@@ -160,7 +169,8 @@ target_link_libraries(FRSWorldEditor PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(FRSWorldEditor PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
+    # /we4129: an unknown escape in a string (L"\TRACKS") is an error, not a path that silently loses its slash.
+    target_compile_options(FRSWorldEditor PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8 /we4129)
     target_link_options(FRSWorldEditor PRIVATE /SUBSYSTEM:WINDOWS)
     # Symbols beside the Release build too, so a crash dump says where it died.
     target_compile_options(FRSWorldEditor PRIVATE $<$<CONFIG:Release>:/Zi>)
